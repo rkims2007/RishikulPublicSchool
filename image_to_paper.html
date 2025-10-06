@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Image to Auto-Formatted Question Paper</title>
+  <style>
+    :root{--accent:#0b63d6}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:18px;background:#f4f6fb;color:#111}
+    .wrap{display:grid;grid-template-columns:360px 1fr;gap:18px}
+    .card{background:#fff;padding:14px;border-radius:10px;box-shadow:0 8px 24px rgba(8,12,20,0.06)}
+    h2{margin:0 0 8px}
+    label{font-size:13px;color:#555;display:block;margin-top:10px}
+    input[type=text],select,textarea{width:100%;padding:8px;border-radius:8px;border:1px solid #e6e9ef;margin-top:6px;font-size:14px}
+    input[type=file]{margin-top:8px}
+    button{margin-top:12px;padding:10px 12px;border-radius:8px;border:0;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+    .small{font-size:13px;color:#666;margin-top:6px}
+    .previewPaper{padding:18px}
+    .paper{width:800px;min-height:1100px;background:#fff;border-radius:6px;padding:28px;margin:auto}
+    .header{text-align:center;border-bottom:2px solid var(--accent);padding-bottom:10px;margin-bottom:18px}
+    .questions ol{padding-left:20px;font-size:15px;line-height:1.7}
+    .status{font-size:13px;color:#333;margin-top:8px}
+    .loader{display:inline-block;border:3px solid #e6eefb;border-top-color:var(--accent);border-radius:50%;width:16px;height:16px;animation:spin 1s linear infinite;margin-right:8px;vertical-align:middle}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    textarea#rawText{height:160px}
+    .controls{display:flex;gap:8px}
+    @media print{body{background:#fff} .wrap{display:block} .card{display:none} .paper{box-shadow:none;margin:0}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h2>Image → Question Paper</h2>
+      <label>School name</label>
+      <input id="school" type="text" value="Rishikul Public School">
+
+      <label>Subject</label>
+      <input id="subject" type="text" value="Science">
+
+      <label>Lesson / Topic</label>
+      <input id="lesson" type="text" value="Human Eye">
+
+      <label>Upload question paper image (photo/scan)</label>
+      <input id="imgInput" type="file" accept="image/*">
+      <div class="small">Tip: clear scans give best results. Use good lighting and crop tightly.</div>
+
+      <label>Extracted raw text (editable)</label>
+      <textarea id="rawText" placeholder="OCR output will appear here"></textarea>
+
+      <div class="controls">
+        <button id="ocrBtn">Run OCR & Auto-format</button>
+        <button id="formatBtn" style="background:#28a745">Format Questions</button>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="previewBtn" style="background:#6c5ce7">Update Preview</button>
+        <button id="printBtn" style="background:#2b2f33">Print / Save PDF</button>
+      </div>
+
+      <div class="status" id="status"></div>
+
+      <h3 style="margin-top:14px">Parsing options</h3>
+      <label>Split strategy</label>
+      <select id="strategy">
+        <option value="numbered">Detect numbered lines (1., 1), Q1)</option>
+        <option value="newline">Split by blank lines</option>
+        <option value="sentences">Split into shorter questions (every ~2 sentences)</option>
+      </select>
+
+      <label>Minimum line length to accept as question</label>
+      <input id="minLen" type="text" value="20">
+
+      <div class="small">After formatting you can edit the raw text and re-run Format Questions to adjust output.</div>
+    </div>
+
+    <div class="card previewPaper">
+      <div class="paper" id="paper">
+        <div class="header">
+          <h1 id="paperSchool">Rishikul Public School</h1>
+          <p id="paperMeta">Science — Lesson: Human Eye</p>
+          <p style="margin-top:8px;font-size:13px;color:#666">Half-Yearly Examination — 2025</p>
+        </div>
+
+        <div class="questions">
+          <h3>Answer the following questions:</h3>
+          <ol id="qList"><li>Use the <em>OCR & Auto-format</em> button to extract questions from the uploaded image.</li></ol>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;display:flex;justify-content:center;gap:8px">
+        <button id="downloadTxt" style="background:#0b63d6">Download .txt</button>
+        <button id="downloadJson" style="background:#0b63d6">Download JSON</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tesseract.js from CDN -->
+  <script src="https://unpkg.com/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+  <script>
+    const imgInput=document.getElementById('imgInput');
+    const ocrBtn=document.getElementById('ocrBtn');
+    const formatBtn=document.getElementById('formatBtn');
+    const previewBtn=document.getElementById('previewBtn');
+    const printBtn=document.getElementById('printBtn');
+    const rawText=document.getElementById('rawText');
+    const status=document.getElementById('status');
+    const qList=document.getElementById('qList');
+    const schoolEl=document.getElementById('paperSchool');
+    const metaEl=document.getElementById('paperMeta');
+    const strategySel=document.getElementById('strategy');
+    const minLenEl=document.getElementById('minLen');
+
+    let lastImageFile=null;
+
+    imgInput.addEventListener('change',e=>{ if(e.target.files && e.target.files[0]) lastImageFile=e.target.files[0]; });
+
+    function setStatus(msg,busy=false){
+      status.innerHTML = (busy? '<span class="loader"></span>':'') + msg;
+    }
+
+    ocrBtn.addEventListener('click', async ()=>{
+      if(!lastImageFile){ setStatus('Please upload an image first.'); return; }
+      setStatus('Running OCR — this may take a few seconds...', true);
+      const imgURL = URL.createObjectURL(lastImageFile);
+      try{
+        const worker = Tesseract.createWorker({logger:m=>{/*console.log(m)*/}});
+        await worker.load();
+        await worker.loadLanguage('eng');
+        await worker.initialize('eng');
+        const { data: { text } } = await worker.recognize(imgURL);
+        await worker.terminate();
+        rawText.value = text.trim();
+        setStatus('OCR complete. Review raw text, then click "Format Questions".');
+      }catch(err){
+        console.error(err);
+        setStatus('OCR failed: '+err.message);
+      }
+    });
+
+    function autoFormatQuestions(text, strategy, minLen){
+      if(!text || text.trim().length===0) return ['No text found'];
+      const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l.length>0);
+      let questions = [];
+
+      if(strategy==='numbered'){
+        // Join lines but keep numbers as separators
+        const joined = text.replace(/\t/g,' ').replace(/\u00A0/g,' ');
+        // Match common numbering patterns like 1., 1), Q1., Q. etc
+        const parts = joined.split(/(?=^\s*(?:\d+\.|\d+\)|Q\d+\.|Q\d+\)|Q\.|Question\s*\d+:?)/gim);
+        parts.forEach(p=>{ const t=p.trim(); if(t.length>=minLen) questions.push(cleanQuestion(t)); });
+        if(questions.length===0){ // fallback: detect lines starting with digits
+          lines.forEach(l=>{ if(/^\d+\W+/.test(l) && l.length>=minLen) questions.push(cleanQuestion(l)); });
+        }
+      }
+
+      if(strategy==='newline'){
+        // treat each blank-line separated paragraph as a question
+        const paras = text.split(/\n\s*\n/).map(p=>p.trim()).filter(p=>p.length>=minLen);
+        questions = paras.map(cleanQuestion);
+      }
+
+      if(strategy==='sentences'){
+        // split into sentences roughly and group every 1-2 sentences
+        const sents = text.replace(/\n/g,' ').split(/(?<=[.?!])\s+(?=[A-Z0-9\"'])/g);
+        let buf=''; let cnt=0;
+        sents.forEach(s=>{
+          if(buf.length>0) buf += ' ' + s; else buf = s;
+          cnt++;
+          if(cnt>=2 || buf.length>120){ questions.push(cleanQuestion(buf.trim())); buf=''; cnt=0; }
+        });
+        if(buf.trim()) questions.push(cleanQuestion(buf.trim()));
+        questions = questions.filter(q=>q.length>=minLen);
+      }
+
+      // final fallback: if nothing found, split lines as questions
+      if(questions.length===0){ lines.forEach(l=>{ if(l.length>=minLen) questions.push(cleanQuestion(l)); }); }
+
+      // remove duplicates and trim
+      questions = Array.from(new Set(questions.map(q=>q.replace(/^\d+\W+/, '').trim()))).map(q=>q.trim()).filter(q=>q.length>0);
+      return questions.length?questions:['No questions detected — try a different split strategy or edit the raw text.'];
+    }
+
+    function cleanQuestion(s){
+      // remove leading numbering like "1.", "(1)", "Q1:" etc
+      return s.replace(/^\s*(?:Q\d+[:.)]?|Question\s*\d+[:.)]?|\(?\d+\)?[:.)]?|\d+[:.)]?)/i,'').trim();
+    }
+
+    formatBtn.addEventListener('click',()=>{
+      const text = rawText.value;
+      const strat = strategySel.value;
+      const minLen = parseInt(minLenEl.value) || 20;
+      setStatus('Formatting text into questions...');
+      const qs = autoFormatQuestions(text,strat,minLen);
+      // populate preview list
+      qList.innerHTML='';
+      qs.forEach(q=>{ const li=document.createElement('li'); li.textContent=q; qList.appendChild(li); });
+      setStatus('Formatted '+qs.length+' question(s). You can edit raw text and re-run.');
+    });
+
+    previewBtn.addEventListener('click',()=>{
+      document.getElementById('paperSchool').textContent = document.getElementById('school').value || 'School Name';
+      document.getElementById('paperMeta').textContent = (document.getElementById('subject').value || 'Subject') + ' — Lesson: ' + (document.getElementById('lesson').value || 'Lesson');
+      setStatus('Preview updated.');
+    });
+
+    printBtn.addEventListener('click',()=>{ window.print(); });
+
+    // download helpers
+    document.getElementById('downloadTxt').addEventListener('click',()=>{
+      const items = Array.from(qList.querySelectorAll('li')).map(li=>li.textContent);
+      const blob = new Blob([items.join('\n\n')], {type:'text/plain'});
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='questions.txt'; a.click(); URL.revokeObjectURL(url);
+    });
+    document.getElementById('downloadJson').addEventListener('click',()=>{
+      const items = Array.from(qList.querySelectorAll('li')).map((li,i)=>({id:i+1,question:li.textContent}));
+      const blob = new Blob([JSON.stringify(items,null,2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='questions.json'; a.click(); URL.revokeObjectURL(url);
+    });
+
+    // Auto-run format when raw text changes (debounced)
+    let debounceTimer=null; rawText.addEventListener('input',()=>{ clearTimeout(debounceTimer); debounceTimer=setTimeout(()=>{ formatBtn.click(); },700); });
+  </script>
+</body>
+</html>
